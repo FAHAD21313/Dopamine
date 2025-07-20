@@ -44,9 +44,11 @@
                 NSLog(@"Error changing app icon: %@", error);
         }];
 
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            [[DOEnvironmentManager sharedManager] updateBootLogo];
-        });
+        if ([DOEnvironmentManager sharedManager].isJailbroken) {
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                [[DOEnvironmentManager sharedManager] updateBootLogo];
+            });
+        }
     }
 }
 

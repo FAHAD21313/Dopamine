@@ -44,11 +44,13 @@ IOMobileFramebufferReturn find_target_display(IOMobileFramebufferRef *pointer, I
 
 IOSurfaceRef create_iosurface_for_display(IOMobileFramebufferDisplaySize size, uint32_t cacheMode)
 {
+	size_t bytesPerRow = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, 4 * size.width);
+
 	NSDictionary *properties = @{
 		(__bridge id)kIOSurfaceWidth : @(size.width),
 		(__bridge id)kIOSurfaceHeight : @(size.height),
 		(__bridge id)kIOSurfacePixelFormat : @0x42475241, // 'ARGB'
-		(__bridge id)kIOSurfaceBytesPerElement : @4,
+		(__bridge id)kIOSurfaceBytesPerRow : @(bytesPerRow),
 		(__bridge id)kIOSurfaceCacheMode : @(cacheMode),
 	};
 
@@ -103,9 +105,7 @@ int display_reset(void)
 
 int draw_image_to_buf(CGImageRef cgImage, IOMobileFramebufferDisplaySize size, void **bufOut, size_t *bufSizeOut)
 {
-	IOSurfaceRef sampleSurface = create_iosurface_for_display(size, 0);
-	int bytesPerRow = IOSurfaceGetBytesPerRow(sampleSurface);
-	CFRelease(sampleSurface);
+	size_t bytesPerRow = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, 4 * size.width);
 
 	int retval = -1;
 	CGContextRef context = NULL;
@@ -196,8 +196,11 @@ int display_draw_raw_path(const char *path)
 	if (fd >= 0) {
 		struct stat s;
 		if (fstat(fd, &s) == 0) {
-			worked = true;
-			read(fd, gDisplay.base, s.st_size);
+			size_t displayBufSize = gDisplay.size.height * gDisplay.bytesPerRow;
+			if (displayBufSize == s.st_size) {
+				worked = true;
+				read(fd, gDisplay.base, s.st_size);
+			}
 		}
 		close(fd);
 	}
@@ -253,6 +256,10 @@ int display_draw_raw(void *rawBuf, size_t rawBufSize)
 {
 	int retval = display_init();
 	if (retval) return retval;
+	size_t displayBufSize = gDisplay.size.height * gDisplay.bytesPerRow;
+	if (rawBufSize != displayBufSize) {
+		return -1;
+	}
 	memcpy(gDisplay.base, rawBuf, rawBufSize);
 	return display_update();
 }

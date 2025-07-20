@@ -7,6 +7,8 @@
 
 #import "DOUIManager.h"
 #import "DOEnvironmentManager.h"
+#import "DOThemeManager.h"
+#import "DOTheme.h"
 #import "NSString+Version.h"
 #import <pthread.h>
 
@@ -317,6 +319,12 @@
         if (!candidate) candidate = key;
     }
     return candidate;
+}
+
+- (UIImage *)renderBootLogo
+{
+    // TODO: user preference to disable, overwrite
+    return [[[DOThemeManager sharedInstance] enabledTheme] generateBootLogo];
 }
 
 @end

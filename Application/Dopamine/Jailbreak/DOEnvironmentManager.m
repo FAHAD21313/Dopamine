@@ -15,6 +15,7 @@
 #import <libjailbreak/info.h>
 #import <libjailbreak/codesign.h>
 #import <libjailbreak/util.h>
+#import <libjailbreak/display.h>
 #import <libjailbreak/machine_info.h>
 #import <libjailbreak/carboncopy.h>
 
@@ -679,5 +680,30 @@ int reboot3(uint64_t flags, ...);
     return error;
 }
 
+- (NSError *)updateBootLogo
+{
+    UIImage *bootLogoImage = [[DOUIManager sharedInstance] renderBootLogo];
+
+    void *bootLogoBuf = NULL;
+    size_t bootLogoSize = 0;
+
+    if (draw_image_to_buf_for_main_screen(bootLogoImage.CGImage, &bootLogoBuf, &bootLogoSize) == 0) {
+        if (bootLogoBuf) {
+            [self runAsRoot:^{
+                [self runUnsandboxed:^{
+                    FILE *bootLogoFile = fopen(JBROOT_PATH("/basebin/bootlogo.raw"), "wb");
+                    if (bootLogoFile) {
+                        fwrite(bootLogoBuf, bootLogoSize, 1, bootLogoFile);
+                        fclose(bootLogoFile);
+                    }
+                }];
+            }];
+
+            free(bootLogoBuf);
+        }
+    }
+
+    return nil;
+}
 
 @end

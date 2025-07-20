@@ -27,29 +27,37 @@ bool gInEarlyBoot = true;
 void abort_with_reason(uint32_t reason_namespace, uint64_t reason_code, const char *reason_string, uint64_t reason_flags);
 extern void systemwide_domain_set_enabled(bool enabled);
 
+// Boot logo drawing invokes some IOKit stuff that seems to initialize os_log / asl
+// We need to temporarily set asl_enabled to false so that it will skip that initialization
+// If we don't do this and it does the initialization, we will cause an assert in _os_log_simple_reinit_4launchd later
+void exec_with_asl_disabled(void (^block)(void))
+{
+	struct asl_context *aslCtx = os_alloc_once(OS_ALLOC_ONCE_KEY_LIBSYSTEM_PLATFORM_ASL, sizeof(struct asl_context), NULL);
+	aslCtx->asl_enabled = false;
+	block();
+	aslCtx->asl_enabled = true;
+}
+
 void draw_boot_logo(void)
 {
-	// const char *bootLogoPath = JBROOT_PATH("/usr/share/boot.jp2");
-	// if (!access(bootLogoPath, R_OK)) {
-	// 	// display_draw_jp2 invokes some IOKit stuff that seems to initialize os_log / asl
-	// 	// We need to temporarily set asl_enabled to false so that it will skip that initialization
-	// 	// If we don't do this and it does the initialization, we will cause an assert in _os_log_simple_reinit_4launchd later
-	// 	struct asl_context *aslCtx = os_alloc_once(OS_ALLOC_ONCE_KEY_LIBSYSTEM_PLATFORM_ASL, sizeof(struct asl_context), NULL);
-	// 	aslCtx->asl_enabled = false;
-
-	// 	display_draw_jp2(bootLogoPath);
-
-	// 	aslCtx->asl_enabled = true;
-	// }
+	exec_with_asl_disabled(^{
+		display_draw_raw_path(JBROOT_PATH("/basebin/bootlogo.raw"));
+	});
 }
 
 int (*sysctlbyname_orig)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
 int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 {
+	int r = sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
 	if (!strcmp(name, "kern.willuserspacereboot")) {
-		draw_boot_logo();
+		dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+			for (int i = 0; i < 8; i++) {
+				draw_boot_logo();
+				usleep(200 * 1000);
+			}
+		});
 	}
-	return sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+	return r;
 }
 
 __attribute__((constructor)) static void initializer(void)

@@ -5,6 +5,9 @@
 #import <IOSurface/IOSurfaceRef.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <ImageIO/ImageIO.h>
+#import <UIKit/UIKit.h>
+#import <sys/stat.h>
+#import <dlfcn.h>
 
 struct display {
 	bool inited;
@@ -25,36 +28,41 @@ int display_update(void)
 	return IOMobileFramebufferSwapEnd(gDisplay.display);
 }
 
-IOMobileFramebufferReturn find_target_display(IOMobileFramebufferRef *pointer)
+IOMobileFramebufferReturn find_target_display(IOMobileFramebufferRef *pointer, IOMobileFramebufferDisplaySize *sizeOut)
 {
+	if (!pointer) return -1;
+
 	IOMobileFramebufferReturn r = IOMobileFramebufferGetMainDisplay(pointer);
 	if (r != 0) {
 		r = IOMobileFramebufferGetSecondaryDisplay(pointer);
 	}
+	if (r == 0 && sizeOut) {
+		IOMobileFramebufferGetDisplaySize(*pointer, sizeOut);
+	}
 	return r;
+}
+
+IOSurfaceRef create_iosurface_for_display(IOMobileFramebufferDisplaySize size, uint32_t cacheMode)
+{
+	NSDictionary *properties = @{
+		(__bridge id)kIOSurfaceWidth : @(size.width),
+		(__bridge id)kIOSurfaceHeight : @(size.height),
+		(__bridge id)kIOSurfacePixelFormat : @0x42475241, // 'ARGB'
+		(__bridge id)kIOSurfaceBytesPerElement : @4,
+		(__bridge id)kIOSurfaceCacheMode : @(cacheMode),
+	};
+
+	return IOSurfaceCreate((__bridge CFDictionaryRef)properties);
 }
 
 int display_init_internal(bool useDCPFlags)
 {
 	if (gDisplay.inited) return 0;
 
-	int r = find_target_display(&gDisplay.display);
+	int r = find_target_display(&gDisplay.display, &gDisplay.size);
 	if (r) return r;
 
-	IOMobileFramebufferGetDisplaySize(gDisplay.display, &gDisplay.size);
-
-	NSDictionary *properties = @{
-		(__bridge id)kIOSurfaceWidth : @(gDisplay.size.width),
-		(__bridge id)kIOSurfaceHeight : @(gDisplay.size.height),
-		(__bridge id)kIOSurfacePixelFormat : @0x42475241, // 'ARGB'
-		(__bridge id)kIOSurfaceBytesPerElement : @4,
-		(__bridge id)kIOSurfaceCacheMode : @(
-			useDCPFlags ? kIOMapWriteCombineCache | kIOMapInhibitCache | kIOMapWriteThruCache | kIOMapCopybackCache 
-						: kIOMapWriteCombineCache),
-	};
-
-	gDisplay.surface = IOSurfaceCreate((__bridge CFDictionaryRef)properties);
-	if (!gDisplay.surface) return -1;
+	gDisplay.surface = create_iosurface_for_display(gDisplay.size, useDCPFlags ? kIOMapWriteCombineCache | kIOMapInhibitCache | kIOMapWriteThruCache | kIOMapCopybackCache : kIOMapWriteCombineCache);
 
 	IOSurfaceLock(gDisplay.surface, 0, 0);
 	gDisplay.base = IOSurfaceGetBaseAddress(gDisplay.surface);
@@ -93,26 +101,17 @@ int display_reset(void)
 	return 0;
 }
 
-int draw_jp2_to_buf(const char* jp2_path, IOMobileFramebufferDisplaySize size, uint32_t bytesPerRow, void **bufOut, size_t *bufSizeOut)
+int draw_image_to_buf(CGImageRef cgImage, IOMobileFramebufferDisplaySize size, void **bufOut, size_t *bufSizeOut)
 {
+	IOSurfaceRef sampleSurface = create_iosurface_for_display(size, 0);
+	int bytesPerRow = IOSurfaceGetBytesPerRow(sampleSurface);
+	CFRelease(sampleSurface);
+
 	int retval = -1;
-	CFURLRef imageURL = NULL;
-	CGImageSourceRef cgImageSource = NULL;
-	CGImageRef cgImage = NULL;
 	CGContextRef context = NULL;
-	CFStringRef bootImageCfString = NULL;
 	CGColorSpaceRef rgbColorSpace = NULL;
 	char *tmpBuf = NULL;
 
-	bootImageCfString = CFStringCreateWithCString(kCFAllocatorDefault, jp2_path, kCFStringEncodingUTF8);
-	if (!bootImageCfString) goto finish;
-
-	imageURL = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, bootImageCfString, kCFURLPOSIXPathStyle, false);
-	if (!imageURL) goto finish;
-	cgImageSource = CGImageSourceCreateWithURL(imageURL, NULL);
-	if (!cgImageSource) goto finish;
-	cgImage = CGImageSourceCreateImageAtIndex(cgImageSource, 0, NULL);
-	if (!cgImage) goto finish;
 	rgbColorSpace = CGColorSpaceCreateDeviceRGB();
 	if (!rgbColorSpace) goto finish;
 
@@ -156,36 +155,116 @@ int draw_jp2_to_buf(const char* jp2_path, IOMobileFramebufferDisplaySize size, u
     retval = 0;
 
 finish:
-	if (bootImageCfString) CFRelease(bootImageCfString);
 	if (context) CGContextRelease(context);
-	if (cgImage) CGImageRelease(cgImage);
-	if (cgImageSource) CFRelease(cgImageSource);
-	if (imageURL) CFRelease(imageURL);
 	if (rgbColorSpace) CGColorSpaceRelease(rgbColorSpace);
 	if (tmpBuf) free(tmpBuf);
 
 	return retval;
 }
 
+int draw_image_to_buf_for_main_screen(CGImageRef image, void **bufOut, size_t *bufSizeOut)
+{
+	IOMobileFramebufferDisplaySize displaySize;
+	IOMobileFramebufferRef targetDisplay;
+	int r = find_target_display(&targetDisplay, &displaySize);
+	if (r != 0) {
+		// If we aren't entitled to get the display info from IOMobileFramebuffer, get it from GraphicsServices instead
+		static CGSize (*__GSMainScreenPixelSize)(void) = NULL;
+		if (!__GSMainScreenPixelSize) {
+			void *graphicsServiceHandle = dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices", RTLD_NOW);
+			__GSMainScreenPixelSize = dlsym(graphicsServiceHandle, "GSMainScreenPixelSize");
+		}
+
+		if (__GSMainScreenPixelSize) {
+			displaySize = __GSMainScreenPixelSize();
+		}
+		else {
+			return -1;
+		}
+	}
+
+	return draw_image_to_buf(image, displaySize, bufOut, bufSizeOut);
+}
+
+int display_draw_raw_path(const char *path)
+{
+	int retval = display_init();
+	if (retval) return retval;
+
+	bool worked = false;
+	int fd = open(path, O_RDONLY);
+	if (fd >= 0) {
+		struct stat s;
+		if (fstat(fd, &s) == 0) {
+			worked = true;
+			read(fd, gDisplay.base, s.st_size);
+		}
+		close(fd);
+	}
+
+	if (!worked) return -1;
+
+	return display_update();
+}
+
+static CGImageRef load_image(const char *image_path)
+{
+	CFURLRef imageURL = NULL;
+	CGImageSourceRef cgImageSource = NULL;
+	CGImageRef cgImage = NULL;
+	CFStringRef bootImageCfString = NULL;
+
+	bootImageCfString = CFStringCreateWithCString(kCFAllocatorDefault, image_path, kCFStringEncodingUTF8);
+	if (!bootImageCfString) goto finish;
+	imageURL = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, bootImageCfString, kCFURLPOSIXPathStyle, false);
+	if (!imageURL) goto finish;
+	cgImageSource = CGImageSourceCreateWithURL(imageURL, NULL);
+	if (!cgImageSource) goto finish;
+	cgImage = CGImageSourceCreateImageAtIndex(cgImageSource, 0, NULL);
+	if (!cgImage) goto finish;
+
+finish:
+	if (bootImageCfString) CFRelease(bootImageCfString);
+	if (imageURL) CFRelease(imageURL);
+	if (cgImageSource) CFRelease(cgImageSource);
+
+	return cgImage;
+}
+
+int draw_image_path_to_buf(const char* image_path, IOMobileFramebufferDisplaySize size, void **bufOut, size_t *bufSizeOut)
+{
+	CGImageRef cgImage = load_image(image_path);
+	if (!cgImage) return -1;
+	int r = draw_image_to_buf(cgImage, size, bufOut, bufSizeOut);
+	CGImageRelease(cgImage);
+	return r;
+}
+
+int draw_image_path_to_buf_for_main_screen(const char* image_path, void **bufOut, size_t *bufSizeOut)
+{
+	CGImageRef cgImage = load_image(image_path);
+	if (!cgImage) return -1;
+	int r = draw_image_to_buf_for_main_screen(cgImage, bufOut, bufSizeOut);
+	CGImageRelease(cgImage);
+	return r;
+}
+
 int display_draw_raw(void *rawBuf, size_t rawBufSize)
 {
+	int retval = display_init();
+	if (retval) return retval;
 	memcpy(gDisplay.base, rawBuf, rawBufSize);
 	return display_update();
 }
 
-int display_draw_jp2(const char* jp2_path)
+int display_draw_image_path(const char* image_path)
 {
 	int retval = -1;
 
-	retval = display_init();
-	if (retval) return retval;
-	//display_reset();
-
 	void *buf = NULL;
 	size_t bufSize = 0;
-	retval = draw_jp2_to_buf(jp2_path, gDisplay.size, gDisplay.bytesPerRow, &buf, &bufSize);
+	retval = draw_image_path_to_buf_for_main_screen(image_path, &buf, &bufSize);
 	if (retval) return retval;
-
 	retval = display_draw_raw(buf, bufSize);
     free(buf);
 	return retval;

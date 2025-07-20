@@ -50,12 +50,14 @@ int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp,
 {
 	int r = sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
 	if (!strcmp(name, "kern.willuserspacereboot")) {
-		dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-			for (int i = 0; i < 8; i++) {
-				draw_boot_logo();
-				usleep(200 * 1000);
-			}
-		});
+		if (!access(JBROOT_PATH("/basebin/bootlogo.raw"), R_OK)) {
+			// When launchd tears down the userspace, it will do so in no particular order
+			// If SpringBoard gets unloaded before backboardd, backboardd will draw a spinning wheel to the framebuffer
+			// If this happens after we wrote the boot logo to the framebuffer, it will be replaced by that
+			// Therefore, we kill backboardd early so that this race does not happen
+			killall("/usr/libexec/backboardd", SIGTERM);
+			draw_boot_logo();
+		}
 	}
 	return r;
 }
@@ -97,7 +99,9 @@ __attribute__((constructor)) static void initializer(void)
 			remove("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRLaunchNotificationController.volatile.plist");
 		}
 
-		draw_boot_logo();
+		if (!access(JBROOT_PATH("/basebin/bootlogo.raw"), R_OK)) {
+			draw_boot_logo();
+		}
 	}
 	else {
 		// Here we should have been injected into a live launchd on the fly

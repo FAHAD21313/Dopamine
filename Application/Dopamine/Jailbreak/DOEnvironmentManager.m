@@ -9,6 +9,7 @@
 
 #import <sys/sysctl.h>
 #import <sys/mount.h>
+#import <sys/utsname.h>
 #import <sys/stat.h>
 #import <mach-o/dyld.h>
 #import <libgrabkernel2/libgrabkernel2.h>
@@ -628,6 +629,20 @@ int reboot3(uint64_t flags, ...);
     return false;
 }
 
+- (BOOL)deviceSupportsLandscapeBootLogo
+{
+    struct utsname u;
+    uname(&u);
+    const char *ipadString = "iPad";
+
+    cpu_subtype_t cpuFamily = 0;
+	size_t cpuFamilySize = sizeof(cpuFamily);
+	sysctlbyname("hw.cpufamily", &cpuFamily, &cpuFamilySize, NULL, 0);
+
+    bool isPad = strncmp(u.machine, ipadString, strlen(ipadString)) == 0;
+    return isPad && (cpuFamily == CPUFAMILY_ARM_FIRESTORM_ICESTORM || cpuFamily == CPUFAMILY_ARM_BLIZZARD_AVALANCHE || cpuFamily == CPUFAMILY_ARM_IBIZA || cpuFamily == CPUFAMILY_ARM_DONAN);
+}
+
 - (NSError *)prepareBootstrap
 {
     __block NSError *errOut;
@@ -680,18 +695,25 @@ int reboot3(uint64_t flags, ...);
     return error;
 }
 
-- (NSError *)updateBootLogo
+- (NSError *)updateBootLogoFrameBufferFromImage:(UIImage *)bootLogoImage forLandscape:(bool)landscape
 {
-    UIImage *bootLogoImage = [[DOUIManager sharedInstance] renderBootLogo];
+    CGSize displaySize = find_display_size();
+    if (landscape) {
+		CGFloat width = displaySize.width;
+		CGFloat height = displaySize.height;
+		displaySize.width = height;
+		displaySize.height = width;
+	}
 
     void *bootLogoBuf = NULL;
     size_t bootLogoSize = 0;
-
-    if (draw_image_to_buf_for_main_screen(bootLogoImage.CGImage, &bootLogoBuf, &bootLogoSize) == 0) {
+    if (draw_image_to_buf(bootLogoImage.CGImage, displaySize, &bootLogoBuf, &bootLogoSize) == 0) {
         if (bootLogoBuf) {
             [self runAsRoot:^{
                 [self runUnsandboxed:^{
-                    FILE *bootLogoFile = fopen(JBROOT_PATH("/basebin/bootlogo.raw"), "wb");
+                    char outPath[PATH_MAX];
+                    sprintf(outPath, JBROOT_PATH("/basebin/bootlogo_%zux%zu.raw"), (size_t)displaySize.width, (size_t)displaySize.height);
+                    FILE *bootLogoFile = fopen(outPath, "wb");
                     if (bootLogoFile) {
                         fwrite(bootLogoBuf, bootLogoSize, 1, bootLogoFile);
                         fclose(bootLogoFile);
@@ -704,6 +726,19 @@ int reboot3(uint64_t flags, ...);
     }
 
     return nil;
+}
+
+- (NSError *)updateBootLogo
+{
+    UIImage *bootLogoImage = [[DOUIManager sharedInstance] renderBootLogo];
+
+    NSError *err = [self updateBootLogoFrameBufferFromImage:bootLogoImage forLandscape:NO];
+    if (err) return err;
+    if ([self deviceSupportsLandscapeBootLogo]) {
+        err = [self updateBootLogoFrameBufferFromImage:bootLogoImage forLandscape:YES];
+    }
+
+    return err;
 }
 
 @end

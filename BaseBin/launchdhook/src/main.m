@@ -38,10 +38,21 @@ void exec_with_asl_disabled(void (^block)(void))
 	aslCtx->asl_enabled = true;
 }
 
-void draw_boot_logo(void)
+char *get_active_boot_logo_path(void)
+{
+	__block CGSize displaySize;
+	exec_with_asl_disabled(^{
+		displaySize = find_display_size();
+	});
+	char *path = malloc(PATH_MAX);
+	sprintf(path, JBROOT_PATH("/basebin/bootlogo_%zux%zu.raw"), (size_t)displaySize.width, (size_t)displaySize.height);
+	return path;
+}
+
+void draw_boot_logo(const char *path)
 {
 	exec_with_asl_disabled(^{
-		display_draw_raw_path(JBROOT_PATH("/basebin/bootlogo.raw"));
+		display_draw_raw_path(path);
 	});
 }
 
@@ -50,13 +61,17 @@ int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp,
 {
 	int r = sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
 	if (!strcmp(name, "kern.willuserspacereboot")) {
-		if (!access(JBROOT_PATH("/basebin/bootlogo.raw"), R_OK)) {
-			// When launchd tears down the userspace, it will do so in no particular order
-			// If SpringBoard gets unloaded before backboardd, backboardd will draw a spinning wheel to the framebuffer
-			// If this happens after we wrote the boot logo to the framebuffer, it will be replaced by that
-			// Therefore, we kill backboardd early so that this race does not happen
-			killall("/usr/libexec/backboardd", SIGTERM);
-			draw_boot_logo();
+		char *bootLogoPath = get_active_boot_logo_path();
+		if (bootLogoPath) {
+			if (!access(bootLogoPath, R_OK)) {
+				// When launchd tears down the userspace, it will do so in no particular order
+				// If SpringBoard gets unloaded before backboardd, backboardd will draw a spinning wheel to the framebuffer
+				// If this happens after we wrote the boot logo to the framebuffer, it will be replaced by that
+				// Therefore, we kill backboardd early so that this race does not happen
+				killall("/usr/libexec/backboardd", SIGTERM);
+				draw_boot_logo(bootLogoPath);
+			}
+			free(bootLogoPath);
 		}
 	}
 	return r;
@@ -99,8 +114,12 @@ __attribute__((constructor)) static void initializer(void)
 			remove("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRLaunchNotificationController.volatile.plist");
 		}
 
-		if (!access(JBROOT_PATH("/basebin/bootlogo.raw"), R_OK)) {
-			draw_boot_logo();
+		char *bootLogoPath = get_active_boot_logo_path();
+		if (bootLogoPath) {
+			if (!access(bootLogoPath, R_OK)) {
+				draw_boot_logo(bootLogoPath);
+			}
+			free(bootLogoPath);
 		}
 	}
 	else {

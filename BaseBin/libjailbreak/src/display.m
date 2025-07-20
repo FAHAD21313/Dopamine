@@ -28,7 +28,7 @@ int display_update(void)
 	return IOMobileFramebufferSwapEnd(gDisplay.display);
 }
 
-IOMobileFramebufferReturn find_target_display(IOMobileFramebufferRef *pointer, IOMobileFramebufferDisplaySize *sizeOut)
+IOMobileFramebufferReturn find_target_display(IOMobileFramebufferRef *pointer)
 {
 	if (!pointer) return -1;
 
@@ -36,10 +36,33 @@ IOMobileFramebufferReturn find_target_display(IOMobileFramebufferRef *pointer, I
 	if (r != 0) {
 		r = IOMobileFramebufferGetSecondaryDisplay(pointer);
 	}
-	if (r == 0 && sizeOut) {
-		IOMobileFramebufferGetDisplaySize(*pointer, sizeOut);
-	}
+
 	return r;
+}
+
+CGSize find_display_size(void)
+{
+	CGSize displaySize = CGSizeMake(0,0);
+
+	IOMobileFramebufferRef targetDisplay;
+	IOMobileFramebufferReturn r = find_target_display(&targetDisplay);
+	if (r == 0) {
+		IOMobileFramebufferGetDisplaySize(targetDisplay, &displaySize);
+	}
+	else {
+		// If we aren't entitled to get the display info from IOMobileFramebuffer, get it from GraphicsServices instead
+		static CGSize (*__GSMainScreenPixelSize)(void) = NULL;
+		if (!__GSMainScreenPixelSize) {
+			void *graphicsServiceHandle = dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices", RTLD_NOW);
+			__GSMainScreenPixelSize = dlsym(graphicsServiceHandle, "GSMainScreenPixelSize");
+		}
+
+		if (__GSMainScreenPixelSize) {
+			displaySize = __GSMainScreenPixelSize();
+		}
+	}
+
+	return displaySize;
 }
 
 IOSurfaceRef create_iosurface_for_display(IOMobileFramebufferDisplaySize size, uint32_t cacheMode)
@@ -61,8 +84,9 @@ int display_init_internal(bool useDCPFlags)
 {
 	if (gDisplay.inited) return 0;
 
-	int r = find_target_display(&gDisplay.display, &gDisplay.size);
+	int r = find_target_display(&gDisplay.display);
 	if (r) return r;
+	gDisplay.size = find_display_size();
 
 	gDisplay.surface = create_iosurface_for_display(gDisplay.size, useDCPFlags ? kIOMapWriteCombineCache | kIOMapInhibitCache | kIOMapWriteThruCache | kIOMapCopybackCache : kIOMapWriteCombineCache);
 
@@ -164,26 +188,7 @@ finish:
 
 int draw_image_to_buf_for_main_screen(CGImageRef image, void **bufOut, size_t *bufSizeOut)
 {
-	IOMobileFramebufferDisplaySize displaySize;
-	IOMobileFramebufferRef targetDisplay;
-	int r = find_target_display(&targetDisplay, &displaySize);
-	if (r != 0) {
-		// If we aren't entitled to get the display info from IOMobileFramebuffer, get it from GraphicsServices instead
-		static CGSize (*__GSMainScreenPixelSize)(void) = NULL;
-		if (!__GSMainScreenPixelSize) {
-			void *graphicsServiceHandle = dlopen("/System/Library/PrivateFrameworks/GraphicsServices.framework/GraphicsServices", RTLD_NOW);
-			__GSMainScreenPixelSize = dlsym(graphicsServiceHandle, "GSMainScreenPixelSize");
-		}
-
-		if (__GSMainScreenPixelSize) {
-			displaySize = __GSMainScreenPixelSize();
-		}
-		else {
-			return -1;
-		}
-	}
-
-	return draw_image_to_buf(image, displaySize, bufOut, bufSizeOut);
+	return draw_image_to_buf(image, find_display_size(), bufOut, bufSizeOut);
 }
 
 int display_draw_raw_path(const char *path)

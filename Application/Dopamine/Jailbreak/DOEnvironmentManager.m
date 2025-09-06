@@ -24,6 +24,7 @@
 #import "DOUIManager.h"
 #import "DOExploitManager.h"
 #import "NSData+Hex.h"
+#import <LocalAuthentication/LocalAuthentication.h>
 
 int reboot3(uint64_t flags, ...);
 
@@ -629,18 +630,28 @@ int reboot3(uint64_t flags, ...);
     return false;
 }
 
+- (BOOL)deviceSupportsFaceID
+{
+    if (![LAContext class]) return NO;
+
+    LAContext *myContext = [[LAContext alloc] init];
+    NSError *authError = nil;
+    if (![myContext canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics error:&authError]) {
+        NSLog(@"%@", [authError localizedDescription]);
+        return NO;
+    }
+
+    return myContext.biometryType == LABiometryTypeFaceID;
+}
+
 - (BOOL)deviceSupportsLandscapeBootLogo
 {
     struct utsname u;
     uname(&u);
     const char *ipadString = "iPad";
 
-    cpu_subtype_t cpuFamily = 0;
-	size_t cpuFamilySize = sizeof(cpuFamily);
-	sysctlbyname("hw.cpufamily", &cpuFamily, &cpuFamilySize, NULL, 0);
-
     bool isPad = strncmp(u.machine, ipadString, strlen(ipadString)) == 0;
-    return isPad && (cpuFamily == CPUFAMILY_ARM_FIRESTORM_ICESTORM || cpuFamily == CPUFAMILY_ARM_BLIZZARD_AVALANCHE || cpuFamily == CPUFAMILY_ARM_IBIZA || cpuFamily == CPUFAMILY_ARM_DONAN);
+    return isPad && [self deviceSupportsFaceID];
 }
 
 - (NSError *)prepareBootstrap

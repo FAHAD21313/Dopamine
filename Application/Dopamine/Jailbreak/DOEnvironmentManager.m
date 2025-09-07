@@ -11,6 +11,7 @@
 #import <sys/mount.h>
 #import <sys/utsname.h>
 #import <sys/stat.h>
+#import <unistd.h>
 #import <mach-o/dyld.h>
 #import <libgrabkernel2/libgrabkernel2.h>
 #import <libjailbreak/info.h>
@@ -23,6 +24,7 @@
 #import <IOKit/IOKitLib.h>
 #import "DOUIManager.h"
 #import "DOExploitManager.h"
+#import "DOPreferenceManager.h"
 #import "NSData+Hex.h"
 #import <LocalAuthentication/LocalAuthentication.h>
 
@@ -710,11 +712,11 @@ int reboot3(uint64_t flags, ...);
 {
     CGSize displaySize = find_display_size();
     if (landscape) {
-		CGFloat width = displaySize.width;
-		CGFloat height = displaySize.height;
-		displaySize.width = height;
-		displaySize.height = width;
-	}
+        CGFloat width = displaySize.width;
+        CGFloat height = displaySize.height;
+        displaySize.width = height;
+        displaySize.height = width;
+    }
 
     void *bootLogoBuf = NULL;
     size_t bootLogoSize = 0;
@@ -739,17 +741,54 @@ int reboot3(uint64_t flags, ...);
     return nil;
 }
 
-- (NSError *)updateBootLogo
+- (NSError *)removeBootLogoForLandscape:(bool)landscape
 {
-    UIImage *bootLogoImage = [[DOUIManager sharedInstance] renderBootLogo];
-
-    NSError *err = [self updateBootLogoFrameBufferFromImage:bootLogoImage forLandscape:NO];
-    if (err) return err;
-    if ([self deviceSupportsLandscapeBootLogo]) {
-        err = [self updateBootLogoFrameBufferFromImage:bootLogoImage forLandscape:YES];
+    CGSize displaySize = find_display_size();
+    if (landscape) {
+        CGFloat width = displaySize.width;
+        CGFloat height = displaySize.height;
+        displaySize.width = height;
+        displaySize.height = width;
     }
 
-    return err;
+    [self runAsRoot:^{
+        [self runUnsandboxed:^{
+            char bootLogoPath[PATH_MAX];
+            sprintf(bootLogoPath, JBROOT_PATH("/basebin/bootlogo_%zux%zu.raw"), (size_t)displaySize.width, (size_t)displaySize.height);
+            unlink(bootLogoPath);
+        }];
+    }];
+
+    return nil;
+}
+
+- (NSError *)updateBootLogo
+{
+    if ([[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"bootlogoEnabled" fallback:YES]) {
+        UIImage *bootLogoImage;
+
+        if ([[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"customBootlogoEnabled" fallback:NO]) {
+            NSString *customBootlogoPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/bootlogo.png"];
+            bootLogoImage = [UIImage imageWithContentsOfFile:customBootlogoPath];
+        }
+
+        if (!bootLogoImage) {
+            bootLogoImage = [[DOUIManager sharedInstance] renderBootLogo];
+        }
+
+        NSError *err = [self updateBootLogoFrameBufferFromImage:bootLogoImage forLandscape:NO];
+        if (err) return err;
+        if ([self deviceSupportsLandscapeBootLogo]) {
+            err = [self updateBootLogoFrameBufferFromImage:bootLogoImage forLandscape:YES];
+        }
+
+        return err;
+    }
+    else {
+        [self removeBootLogoForLandscape:NO];
+        [self removeBootLogoForLandscape:YES];
+        return nil;
+    }
 }
 
 @end

@@ -6,6 +6,7 @@
 //
 
 #import "DOEnvironmentManager.h"
+#import "UIImage+JPEG2000.h"
 
 #import <sys/sysctl.h>
 #import <sys/mount.h>
@@ -708,62 +709,9 @@ int reboot3(uint64_t flags, ...);
     return error;
 }
 
-- (NSError *)updateBootLogoFrameBufferFromImage:(UIImage *)bootLogoImage forLandscape:(bool)landscape
-{
-    CGSize displaySize = find_display_size();
-    if (landscape) {
-        CGFloat width = displaySize.width;
-        CGFloat height = displaySize.height;
-        displaySize.width = height;
-        displaySize.height = width;
-    }
-
-    void *bootLogoBuf = NULL;
-    size_t bootLogoSize = 0;
-    if (draw_image_to_buf(bootLogoImage.CGImage, displaySize, &bootLogoBuf, &bootLogoSize) == 0) {
-        if (bootLogoBuf) {
-            [self runAsRoot:^{
-                [self runUnsandboxed:^{
-                    char outPath[PATH_MAX];
-                    sprintf(outPath, JBROOT_PATH("/basebin/bootlogo_%zux%zu.raw"), (size_t)displaySize.width, (size_t)displaySize.height);
-                    FILE *bootLogoFile = fopen(outPath, "wb");
-                    if (bootLogoFile) {
-                        fwrite(bootLogoBuf, bootLogoSize, 1, bootLogoFile);
-                        fclose(bootLogoFile);
-                    }
-                }];
-            }];
-
-            free(bootLogoBuf);
-        }
-    }
-
-    return nil;
-}
-
-- (NSError *)removeBootLogoForLandscape:(bool)landscape
-{
-    CGSize displaySize = find_display_size();
-    if (landscape) {
-        CGFloat width = displaySize.width;
-        CGFloat height = displaySize.height;
-        displaySize.width = height;
-        displaySize.height = width;
-    }
-
-    [self runAsRoot:^{
-        [self runUnsandboxed:^{
-            char bootLogoPath[PATH_MAX];
-            sprintf(bootLogoPath, JBROOT_PATH("/basebin/bootlogo_%zux%zu.raw"), (size_t)displaySize.width, (size_t)displaySize.height);
-            unlink(bootLogoPath);
-        }];
-    }];
-
-    return nil;
-}
-
 - (NSError *)updateBootLogo
 {
+    const char *bootLogoPath = JBROOT_PATH("/basebin/bootlogo.jp2");
     if ([[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"bootlogoEnabled" fallback:YES]) {
         UIImage *bootLogoImage;
 
@@ -776,17 +724,21 @@ int reboot3(uint64_t flags, ...);
             bootLogoImage = [[DOUIManager sharedInstance] renderBootLogo];
         }
 
-        NSError *err = [self updateBootLogoFrameBufferFromImage:bootLogoImage forLandscape:NO];
-        if (err) return err;
-        if ([self deviceSupportsLandscapeBootLogo]) {
-            err = [self updateBootLogoFrameBufferFromImage:bootLogoImage forLandscape:YES];
-        }
+        [self runAsRoot:^{
+            [self runUnsandboxed:^{
+                unlink(bootLogoPath);
+                [[bootLogoImage jp2DataWithCompressionQuality:0.9] writeToFile:[NSString stringWithUTF8String:bootLogoPath] atomically:NO];
+            }];
+        }];
 
-        return err;
+        return nil;
     }
     else {
-        [self removeBootLogoForLandscape:NO];
-        [self removeBootLogoForLandscape:YES];
+        [self runAsRoot:^{
+            [self runUnsandboxed:^{
+                unlink(bootLogoPath);
+            }];
+        }];
         return nil;
     }
 }

@@ -38,22 +38,20 @@ void exec_with_asl_disabled(void (^block)(void))
 	aslCtx->asl_enabled = true;
 }
 
-char *get_active_boot_logo_path(void)
+void draw_boot_logo(const char *bootLogoPath)
 {
-	__block CGSize displaySize;
-	exec_with_asl_disabled(^{
-		displaySize = find_display_size();
-	});
-	char *path = malloc(PATH_MAX);
-	sprintf(path, JBROOT_PATH("/basebin/bootlogo_%zux%zu.raw"), (size_t)displaySize.width, (size_t)displaySize.height);
-	return path;
-}
-
-void draw_boot_logo(const char *path)
-{
-	exec_with_asl_disabled(^{
-		display_draw_raw_path(path);
-	});
+	if (bootLogoPath) {
+		if (!access(bootLogoPath, R_OK)) {
+			// When launchd tears down the userspace, it will do so in no particular order
+			// If SpringBoard gets unloaded before backboardd, backboardd will draw a spinning wheel to the framebuffer
+			// If this happens after we wrote the boot logo to the framebuffer, it will be replaced by that
+			// Therefore, we kill backboardd early so that this race does not happen
+			killall("/usr/libexec/backboardd", SIGTERM);
+			exec_with_asl_disabled(^{
+				display_draw_image_path(bootLogoPath);
+			});
+		}
+	}
 }
 
 int (*sysctlbyname_orig)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
@@ -61,18 +59,7 @@ int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp,
 {
 	int r = sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
 	if (!strcmp(name, "kern.willuserspacereboot")) {
-		char *bootLogoPath = get_active_boot_logo_path();
-		if (bootLogoPath) {
-			if (!access(bootLogoPath, R_OK)) {
-				// When launchd tears down the userspace, it will do so in no particular order
-				// If SpringBoard gets unloaded before backboardd, backboardd will draw a spinning wheel to the framebuffer
-				// If this happens after we wrote the boot logo to the framebuffer, it will be replaced by that
-				// Therefore, we kill backboardd early so that this race does not happen
-				killall("/usr/libexec/backboardd", SIGTERM);
-				draw_boot_logo(bootLogoPath);
-			}
-			free(bootLogoPath);
-		}
+		draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
 	}
 	return r;
 }
@@ -114,13 +101,7 @@ __attribute__((constructor)) static void initializer(void)
 			remove("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRLaunchNotificationController.volatile.plist");
 		}
 
-		char *bootLogoPath = get_active_boot_logo_path();
-		if (bootLogoPath) {
-			if (!access(bootLogoPath, R_OK)) {
-				draw_boot_logo(bootLogoPath);
-			}
-			free(bootLogoPath);
-		}
+		draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
 	}
 	else {
 		// Here we should have been injected into a live launchd on the fly

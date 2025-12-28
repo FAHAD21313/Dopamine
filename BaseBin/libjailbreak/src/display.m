@@ -9,6 +9,10 @@
 #import <sys/stat.h>
 #import <dlfcn.h>
 
+#define RADIANS(degrees) ( degrees * M_PI / 180 )
+
+CFTypeRef MGCopyAnswer(CFStringRef str);
+
 struct display {
 	bool inited;
 	void *base;
@@ -127,7 +131,7 @@ int display_reset(void)
 	return 0;
 }
 
-int draw_image_to_buf(CGImageRef cgImage, IOMobileFramebufferDisplaySize size, void **bufOut, size_t *bufSizeOut)
+int draw_image_to_buf(CGImageRef cgImage, IOMobileFramebufferDisplaySize size, CGFloat rotation, void **bufOut, size_t *bufSizeOut)
 {
 	size_t bytesPerRow = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, 4 * size.width);
 
@@ -140,43 +144,41 @@ int draw_image_to_buf(CGImageRef cgImage, IOMobileFramebufferDisplaySize size, v
 	if (!rgbColorSpace) goto finish;
 
 	CGRect destinationRect = CGRectZero;
-	CGFloat imageWidth = CGImageGetWidth(cgImage);
+	CGFloat imageWidth  = CGImageGetWidth(cgImage);
 	CGFloat imageHeight = CGImageGetHeight(cgImage);
-	
-	CGFloat widthFactor = size.width / imageWidth;
+
+	CGFloat widthFactor  = size.width  / imageWidth;
 	CGFloat heightFactor = size.height / imageHeight;
-	CGFloat scaleFactor = widthFactor > heightFactor ? widthFactor : heightFactor;
-	CGFloat scaledWidth  = imageWidth * scaleFactor;
+	CGFloat scaleFactor  = widthFactor > heightFactor ? widthFactor : heightFactor;
+
+	CGFloat scaledWidth  = imageWidth  * scaleFactor;
 	CGFloat scaledHeight = imageHeight * scaleFactor;
 
-	destinationRect.size.width = scaledWidth;
-	destinationRect.size.height = scaledHeight;
-	
+	destinationRect.size = CGSizeMake(scaledWidth, scaledHeight);
 	if (widthFactor > heightFactor) {
-		destinationRect.origin.y = (size.height - scaledHeight) / 2;
+		destinationRect.origin.y = (size.height - scaledHeight) * 0.5;
 	} else {
-		destinationRect.origin.x = (size.width - scaledWidth) / 2;
+		destinationRect.origin.x = (size.width - scaledWidth) * 0.5;
 	}
 
 	size_t bufSize = size.height * bytesPerRow;
 	tmpBuf = malloc(bufSize);
-	if (!tmpBuf) {
-		retval = -1;
-		goto finish;
-	}
+	if (!tmpBuf) goto finish;
 	memset(tmpBuf, 0, bufSize);
 
 	context = CGBitmapContextCreate(tmpBuf, size.width, size.height, 8, bytesPerRow, rgbColorSpace, kCGImageAlphaPremultipliedFirst | kCGImageByteOrder32Little);
-	if (!context) {
-		retval = -1;
-		goto finish;
-	}
+	if (!context) goto finish;
+
+	CGContextTranslateCTM(context, size.width  * 0.5, size.height * 0.5);
+	CGContextRotateCTM(context, RADIANS(rotation));
+	CGContextTranslateCTM(context, -size.width  * 0.5, -size.height * 0.5);
 
 	CGContextDrawImage(context, destinationRect, cgImage);
+
 	*bufOut = tmpBuf;
 	*bufSizeOut = bufSize;
 	tmpBuf = NULL;
-    retval = 0;
+	retval = 0;
 
 finish:
 	if (context) CGContextRelease(context);
@@ -186,9 +188,52 @@ finish:
 	return retval;
 }
 
+BOOL is_ipad(void)
+{
+	CFStringRef deviceClass = MGCopyAnswer(CFSTR("DeviceClass"));
+	if (!deviceClass) return NO;
+	BOOL result = CFStringCompare(deviceClass, CFSTR("iPad"), 0) == kCFCompareEqualTo;
+	CFRelease(deviceClass);
+	return result;
+}
+
+CGFloat get_main_screen_rotation(void)
+{
+	if (is_ipad()) {
+		CFNumberRef mainScreenOrientationNum = MGCopyAnswer(CFSTR("main-screen-orientation"));
+		if (mainScreenOrientationNum) {
+			unsigned long long mainScreenOrientation = [(__bridge NSNumber *)mainScreenOrientationNum unsignedLongLongValue];
+			if (mainScreenOrientation == 0) { // iPads that have a non landscape base orientation...
+				CFNumberRef displayBootRotationNum = MGCopyAnswer(CFSTR("DisplayBootRotation"));
+				unsigned long long displayBootRotation = [(__bridge NSNumber *)displayBootRotationNum unsignedLongLongValue]; // ...need to take the displayBootRotation as the image rotation
+
+				switch (displayBootRotation) {
+					case 0:
+					return 0;
+					case 90:
+					return 270;
+					case 180:
+					return 180;
+					case 270:
+					return 90;
+				}
+			}
+			else { // iPads that DO have a lanscape base orientation...
+				CFNumberRef displayBootRotationNum = MGCopyAnswer(CFSTR("DisplayBootRotation"));
+				unsigned long long displayBootRotation = [(__bridge NSNumber *)displayBootRotationNum unsignedLongLongValue];
+				if (displayBootRotation == 180) {
+					return 180; // ...only need a fix for upside down?????
+				}
+			}
+		}
+	}
+
+	return 0;
+}
+
 int draw_image_to_buf_for_main_screen(CGImageRef image, void **bufOut, size_t *bufSizeOut)
 {
-	return draw_image_to_buf(image, find_display_size(), bufOut, bufSizeOut);
+	return draw_image_to_buf(image, find_display_size(), get_main_screen_rotation(), bufOut, bufSizeOut);
 }
 
 int display_draw_raw_path(const char *path)
@@ -239,11 +284,75 @@ finish:
 	return cgImage;
 }
 
-int draw_image_path_to_buf(const char* image_path, IOMobileFramebufferDisplaySize size, void **bufOut, size_t *bufSizeOut)
+int save_image_bitmap_to_plist(CGImageRef imageRef, const char *outPath)
+{
+	if (!imageRef) return -1;
+
+	CGDataProviderRef dataProvider = CGImageGetDataProvider(imageRef);
+	if (!dataProvider) return -1;
+	CFDataRef data = CGDataProviderCopyData(dataProvider);
+	if (!data) return -1;
+	
+	NSDictionary *imagePlist = @{
+		@"width" : @(CGImageGetWidth(imageRef)),
+		@"height" : @(CGImageGetHeight(imageRef)),
+		@"bitsPerComponent" : @(CGImageGetBitsPerComponent(imageRef)),
+		@"bitsPerPixel" : @(CGImageGetBitsPerPixel(imageRef)),
+		@"bytesPerRow" : @(CGImageGetBytesPerRow(imageRef)),
+		@"bitmapData" : (__bridge id)data,
+	};
+
+	CFRelease(data);
+
+	return [imagePlist writeToURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:outPath]] error:nil] != true;
+}
+
+CGImageRef load_image_from_bitmap_plist(const char *bitmapPlistPath)
+{
+	NSDictionary *imagePlist = [NSDictionary dictionaryWithContentsOfURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:bitmapPlistPath]] error:nil];
+	if (!imagePlist) return NULL;
+
+	size_t width = ((NSNumber *)imagePlist[@"width"]).unsignedLongLongValue;
+	size_t height = ((NSNumber *)imagePlist[@"height"]).unsignedLongLongValue;
+	size_t bitsPerComponent = ((NSNumber *)imagePlist[@"bitsPerComponent"]).unsignedLongLongValue;
+	size_t bitsPerPixel = ((NSNumber *)imagePlist[@"bitsPerPixel"]).unsignedLongLongValue;
+	size_t bytesPerRow = ((NSNumber *)imagePlist[@"bytesPerRow"]).unsignedLongLongValue;
+	NSData *bitmapData = imagePlist[@"bitmapData"];
+	const void *bitmapBuffer = bitmapData.bytes;
+
+	if ((height * bytesPerRow) != bitmapData.length) {
+		return NULL;
+	}
+
+	CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, bitmapBuffer, height * bytesPerRow, NULL);
+
+	CGColorSpaceRef colorSpaceRef = CGColorSpaceCreateDeviceRGB();
+	CGBitmapInfo bitmapInfo = kCGBitmapByteOrderDefault;
+	CGColorRenderingIntent renderingIntent = kCGRenderingIntentDefault;
+
+	CGImageRef imageRef = CGImageCreate(width,
+		height,
+		bitsPerComponent,
+		bitsPerPixel,
+		bytesPerRow,
+		colorSpaceRef,
+		bitmapInfo,
+		provider,
+		NULL,
+		NO,
+		renderingIntent);
+
+	CGDataProviderRelease(provider);
+	CGColorSpaceRelease(colorSpaceRef);
+	
+	return imageRef;
+}
+
+int draw_image_path_to_buf(const char* image_path, IOMobileFramebufferDisplaySize size, CGFloat rotation, void **bufOut, size_t *bufSizeOut)
 {
 	CGImageRef cgImage = load_image(image_path);
 	if (!cgImage) return -1;
-	int r = draw_image_to_buf(cgImage, size, bufOut, bufSizeOut);
+	int r = draw_image_to_buf(cgImage, size, rotation, bufOut, bufSizeOut);
 	CGImageRelease(cgImage);
 	return r;
 }
@@ -276,6 +385,19 @@ int display_draw_image_path(const char* image_path)
 	void *buf = NULL;
 	size_t bufSize = 0;
 	retval = draw_image_path_to_buf_for_main_screen(image_path, &buf, &bufSize);
+	if (retval) return retval;
+	retval = display_draw_raw(buf, bufSize);
+    free(buf);
+	return retval;
+}
+
+int display_draw_image(CGImageRef cgImage)
+{
+	int retval = -1;
+
+	void *buf = NULL;
+	size_t bufSize = 0;
+	retval = draw_image_to_buf_for_main_screen(cgImage, &buf, &bufSize);
 	if (retval) return retval;
 	retval = display_draw_raw(buf, bufSize);
     free(buf);

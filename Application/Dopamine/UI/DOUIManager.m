@@ -323,7 +323,6 @@
 
 - (UIImage *)renderBootLogo
 {
-    // TODO: user preference to disable, overwrite
     return [[[DOThemeManager sharedInstance] enabledTheme] generateBootLogo];
 }
 

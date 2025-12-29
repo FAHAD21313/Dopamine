@@ -139,29 +139,11 @@ int draw_image_to_buf(CGImageRef cgImage, IOMobileFramebufferDisplaySize size, C
 	CGContextRef context = NULL;
 	CGColorSpaceRef rgbColorSpace = NULL;
 	char *tmpBuf = NULL;
+	size_t bufSize = size.height * bytesPerRow;
 
 	rgbColorSpace = CGColorSpaceCreateDeviceRGB();
 	if (!rgbColorSpace) goto finish;
 
-	CGRect destinationRect = CGRectZero;
-	CGFloat imageWidth  = CGImageGetWidth(cgImage);
-	CGFloat imageHeight = CGImageGetHeight(cgImage);
-
-	CGFloat widthFactor  = size.width  / imageWidth;
-	CGFloat heightFactor = size.height / imageHeight;
-	CGFloat scaleFactor  = widthFactor > heightFactor ? widthFactor : heightFactor;
-
-	CGFloat scaledWidth  = imageWidth  * scaleFactor;
-	CGFloat scaledHeight = imageHeight * scaleFactor;
-
-	destinationRect.size = CGSizeMake(scaledWidth, scaledHeight);
-	if (widthFactor > heightFactor) {
-		destinationRect.origin.y = (size.height - scaledHeight) * 0.5;
-	} else {
-		destinationRect.origin.x = (size.width - scaledWidth) * 0.5;
-	}
-
-	size_t bufSize = size.height * bytesPerRow;
 	tmpBuf = malloc(bufSize);
 	if (!tmpBuf) goto finish;
 	memset(tmpBuf, 0, bufSize);
@@ -169,11 +151,25 @@ int draw_image_to_buf(CGImageRef cgImage, IOMobileFramebufferDisplaySize size, C
 	context = CGBitmapContextCreate(tmpBuf, size.width, size.height, 8, bytesPerRow, rgbColorSpace, kCGImageAlphaPremultipliedFirst | kCGImageByteOrder32Little);
 	if (!context) goto finish;
 
-	CGContextTranslateCTM(context, size.width  * 0.5, size.height * 0.5);
-	CGContextRotateCTM(context, RADIANS(rotation));
-	CGContextTranslateCTM(context, -size.width  * 0.5, -size.height * 0.5);
+	CGFloat imageWidth  = CGImageGetWidth(cgImage);
+	CGFloat imageHeight = CGImageGetHeight(cgImage);
 
-	CGContextDrawImage(context, destinationRect, cgImage);
+	CGFloat radians = RADIANS(rotation);
+	CGFloat cosTheta = fabs(cos(radians));
+	CGFloat sinTheta = fabs(sin(radians));
+
+	CGFloat rotatedWidth  = imageWidth * cosTheta + imageHeight * sinTheta;
+	CGFloat rotatedHeight = imageWidth * sinTheta + imageHeight * cosTheta;
+
+	CGFloat scale = MAX(size.width  / rotatedWidth, size.height / rotatedHeight);
+
+	CGContextTranslateCTM(context, size.width  * 0.5, size.height * 0.5);
+	CGContextRotateCTM(context, radians);
+	CGContextScaleCTM(context, scale, scale);
+
+	CGRect imageRect = CGRectMake(-imageWidth  * 0.5, -imageHeight * 0.5, imageWidth, imageHeight);
+
+	CGContextDrawImage(context, imageRect, cgImage);
 
 	*bufOut = tmpBuf;
 	*bufSizeOut = bufSize;

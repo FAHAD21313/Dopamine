@@ -217,8 +217,15 @@ CGFloat get_main_screen_rotation(void)
 			else { // iPads that DO have a lanscape base orientation...
 				CFNumberRef displayBootRotationNum = MGCopyAnswer(CFSTR("DisplayBootRotation"));
 				unsigned long long displayBootRotation = [(__bridge NSNumber *)displayBootRotationNum unsignedLongLongValue];
-				if (displayBootRotation == 180) {
-					return 180; // ...only need a fix for upside down?????
+				switch (displayBootRotation) {
+					case 0:
+					return 90;
+					case 90:
+					return 0;
+					case 180:
+					return 270;
+					case 270:
+					return 180;
 				}
 			}
 		}

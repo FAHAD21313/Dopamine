@@ -28,10 +28,32 @@
 #import "DOPreferenceManager.h"
 #import "NSData+Hex.h"
 #import <LocalAuthentication/LocalAuthentication.h>
+#import <CoreServices/LSApplicationProxy.h>
 
 int reboot3(uint64_t flags, ...);
 CFPropertyListRef MGCopyAnswer(CFStringRef);
 extern char **environ;
+
+@interface LSApplicationWorkspace : NSObject
++ (instancetype)defaultWorkspace;
+- (NSArray<LSApplicationProxy *> *)allApplications;
+- (BOOL)unregisterApplication:(NSURL *)url;
+@end
+
+static const unsigned int JailbreakAppUnregistrationSettleSeconds = 5;
+
+static BOOL IsJailbreakApplicationPath(NSString *applicationPath, NSString *rootPathPrefix)
+{
+    // Registered paths of jailbreak apps point into the jailbreak root, even when the app bundles have already been deleted
+    if (rootPathPrefix && [applicationPath hasPrefix:rootPathPrefix]) return YES;
+    // The /var/jb symlink form, in case it can no longer be resolved to the preboot path
+    if ([applicationPath hasPrefix:@"/var/jb/Applications/"]) return YES;
+    if ([applicationPath containsString:@"/procursus/Applications/"]) {
+        if ([applicationPath containsString:@"/dopamine-"]) return YES;
+        if ([applicationPath containsString:@"/jb-"]) return YES;
+    }
+    return NO;
+}
 
 @implementation DOEnvironmentManager
 
@@ -481,6 +503,74 @@ extern char **environ;
     }];
 }
 
+- (void)unregisterJailbreakAppsForRemoval
+{
+    [self runAsRoot:^{
+        [self runUnsandboxed:^{
+            NSString *rootPath = gSystemInfo.jailbreakInfo.rootPath ? [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath] : nil;
+            BOOL hasValidRoot = rootPath.length > 1;
+
+            // First pass: unregister via uicache, the mechanism proven to clear the icon database on rootless.
+            // This only applies to apps whose bundles still exist on disk.
+            // Use the cached root path instead of JBROOT_PATH, as jbclient may be unavailable while the jailbreak is being removed.
+            if (hasValidRoot) {
+                NSString *applicationsPath = [rootPath stringByAppendingPathComponent:@"Applications"];
+                NSArray<NSString *> *jailbreakApps = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:applicationsPath error:nil];
+                for (NSString *jailbreakApp in jailbreakApps) {
+                    NSString *jailbreakAppPath = [applicationsPath stringByAppendingPathComponent:jailbreakApp];
+                    exec_cmd([[rootPath stringByAppendingPathComponent:@"usr/bin/uicache"] fileSystemRepresentation], "-u", jailbreakAppPath.fileSystemRepresentation, NULL);
+                }
+            }
+
+            // Second pass: unregister any registered application record pointing into the jailbreak root.
+            // This is what clears the leftover home screen icons when the app bundles have already been deleted,
+            // as the bootstrap removal deletes the apps without unregistering them.
+            Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+            if (!workspaceClass || ![workspaceClass respondsToSelector:@selector(defaultWorkspace)]) {
+                [[DOUIManager sharedInstance] sendLog:@"Unregistering jailbreak apps: LSApplicationWorkspace unavailable" debug:YES];
+                return;
+            }
+
+            @try {
+                LSApplicationWorkspace *workspace = [workspaceClass defaultWorkspace];
+                if (![workspace respondsToSelector:@selector(allApplications)] || ![workspace respondsToSelector:@selector(unregisterApplication:)]) {
+                    [[DOUIManager sharedInstance] sendLog:@"Unregistering jailbreak apps: required selectors missing" debug:YES];
+                    return;
+                }
+
+                NSArray<LSApplicationProxy *> *applications = workspace.allApplications;
+                if (![applications isKindOfClass:NSArray.class]) {
+                    [[DOUIManager sharedInstance] sendLog:@"Unregistering jailbreak apps: allApplications returned non-array" debug:YES];
+                    return;
+                }
+
+                NSString *rootPathPrefix = hasValidRoot ? [[rootPath stringByAppendingPathComponent:@"Applications"] stringByAppendingString:@"/"] : nil;
+
+                NSUInteger matchedCount = 0;
+                NSUInteger unregisteredCount = 0;
+                for (LSApplicationProxy *application in applications) {
+                    NSString *applicationPath = application.bundleURL.path.stringByResolvingSymlinksInPath.stringByStandardizingPath;
+                    if (!applicationPath) continue;
+
+                    if (IsJailbreakApplicationPath(applicationPath, rootPathPrefix)) {
+                        matchedCount++;
+                        if ([workspace unregisterApplication:application.bundleURL]) {
+                            unregisteredCount++;
+                        }
+                    }
+                }
+
+                [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"Unregistered %lu of %lu jailbreak apps", (unsigned long)unregisteredCount, (unsigned long)matchedCount] debug:YES];
+
+                // Give the icon database some time to settle before the bootstrap is deleted
+                sleep(JailbreakAppUnregistrationSettleSeconds);
+            } @catch (NSException *exception) {
+                [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"Failed to unregister jailbreak applications: %@: %@", exception.name, exception.reason] debug:YES];
+            }
+        }];
+    }];
+}
+
 - (void)reboot
 {
     [self runAsRoot:^{
@@ -840,6 +930,7 @@ extern char **environ;
         return nil;
     }
     else if ([self isJailbroken]) {
+        [self unregisterJailbreakAppsForRemoval];
         __block NSError *error;
         [self runAsRoot:^{
             [self runUnsandboxed:^{
@@ -849,6 +940,7 @@ extern char **environ;
         return error;
     }
     else {
+        [self unregisterJailbreakAppsForRemoval];
         // Let's hope for the best
         return [_bootstrapper deleteBootstrap];
     }
